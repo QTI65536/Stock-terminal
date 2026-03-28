@@ -5,7 +5,7 @@ import numpy as np
 import os
 
 # --- 1. Global UI & Typography Guard ---
-st.set_page_config(layout="wide", page_title="Alpha Terminal v1.0", page_icon="🎯")
+st.set_page_config(layout="wide", page_title="Alpha Terminal v1.1", page_icon="🎯")
 
 st.markdown("""
     <style>
@@ -21,40 +21,70 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. Professional Data Engine ---
+# --- 2. Professional Data Engine (Bulletproof Version) ---
 def load_terminal_data(file_source, is_path=False):
-    """Handles both uploaded files and local system paths."""
     rating_map = {
         'AAA': 100, 'AA+': 95, 'AA': 90, 'AA-': 85, 'A+': 80, 'A': 75, 'A-': 70,
         'BBB+': 65, 'BBB': 60, 'BBB-': 55, 'BB+': 45, 'BB': 40, 'B+': 30, 'B': 20
     }
     
     try:
+        # Use utf-8-sig to automatically handle Excel BOM markers
         if is_path:
-            df = pd.read_csv(file_source, encoding='latin1')
+            df = pd.read_csv(file_source, encoding='utf-8-sig')
         else:
             file_source.seek(0)
-            df = pd.read_csv(file_source, encoding='latin1')
+            df = pd.read_csv(file_source, encoding='utf-8-sig')
             
+        # CLEAN HEADERS: Remove any invisible spaces or newlines
+        df.columns = df.columns.str.strip()
+
+        # FALLBACK: If 'Ticker' isn't found exactly, look for it case-insensitively
+        if 'Ticker' not in df.columns:
+            match = [c for c in df.columns if c.lower() == 'ticker']
+            if match:
+                df.rename(columns={match[0]: 'Ticker'}, inplace=True)
+            else:
+                st.error(f"Critical Error: 'Ticker' column missing. Found: {list(df.columns)}")
+                return None
+
         # Ticker & Metric Cleaning
         df['Ticker'] = df['Ticker'].astype(str).str.split(':').str[0].str.strip()
-        num_cols = ['Closing Price', 'Dividend Yield', 'Est EPS Growth', 'Current Valuation', 'P/E']
-        for col in num_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col].astype(str).str.replace(r'[$,%x,]', '', regex=True), errors='coerce')
         
-        # Risk Ledger
-        df['Rating'] = df['Credit Rating']
-        df['Safety Score'] = df['Credit Rating'].map(rating_map).fillna(50)
+        # Define necessary columns for the Alpha Radar
+        num_cols = {
+            'Closing Price': 'price',
+            'Dividend Yield': 'yield',
+            'Est EPS Growth': 'growth',
+            'Current Valuation': 'valuation',
+            'Safety Score': 'safety'
+        }
+
+        for col in df.columns:
+            # Clean numeric strings ($ , % x)
+            if df[col].dtype == 'object':
+                df[col] = df[col].astype(str).str.replace(r'[$,%x,]', '', regex=True)
+                # Convert to numeric, but keep as object if it's a name/sector
+                converted = pd.to_numeric(df[col], errors='coerce')
+                if not converted.isna().all():
+                    df[col] = converted
+
+        # Risk Ledger (Calculated from your Credit Rating requirement)
+        if 'Credit Rating' in df.columns:
+            df['Rating'] = df['Credit Rating']
+            df['Safety Score'] = df['Credit Rating'].map(rating_map).fillna(50)
+        else:
+            df['Safety Score'] = 50 # Fallback
+            
         return df
     except Exception as e:
-        st.error(f"Error loading data: {e}")
+        st.error(f"Engine Error: {e}")
         return None
 
 # --- 3. Sidebar & Auto-Load Logic ---
 st.sidebar.header("📊 DATA CONTROLS")
 
-# Check for a default file in the repository (e.g., 'latest_v1.csv')
+# Ensure the filename matches exactly what is on GitHub (Case Sensitive)
 DEFAULT_FILE = "sp500_dataset.csv" 
 files = st.sidebar.file_uploader("Upload New EOD CSV", accept_multiple_files=True)
 
@@ -69,22 +99,28 @@ if files:
         active_df = data_map[selected[-1]]
         mode_label = "Live Upload Mode"
 elif os.path.exists(DEFAULT_FILE):
-    # Use repository default if no upload exists
+    # Use repository default
     active_df = load_terminal_data(DEFAULT_FILE, is_path=True)
-    mode_label = f"Auto-Load Mode: {DEFAULT_FILE}"
-    st.sidebar.info(f"Using default dataset: {DEFAULT_FILE}")
+    if active_df is not None:
+        mode_label = f"Auto-Load: {DEFAULT_FILE}"
+        st.sidebar.success(f"✅ Loaded: {DEFAULT_FILE}")
+    else:
+        st.sidebar.error(f"❌ Failed to parse {DEFAULT_FILE}")
 
 # --- 4. Main Interface ---
 if active_df is not None:
     df = active_df.copy()
     
-    # Filters
+    # Sidebar Filters
     st.sidebar.divider()
-    max_y = float(df['Dividend Yield'].max()) if not df['Dividend Yield'].dropna().empty else 10.0
-    yield_range = st.sidebar.slider("Yield Filter (%)", 0.0, max_y, (0.0, max_y))
-    safety_range = st.sidebar.slider("Safety Score Filter", 0, 100, (0, 100))
+    y_col = 'Dividend Yield' if 'Dividend Yield' in df.columns else None
     
-    df = df[(df['Dividend Yield'] >= yield_range[0]) & (df['Dividend Yield'] <= yield_range[1])]
+    if y_col:
+        max_y = float(df[y_col].max()) if not df[y_col].dropna().empty else 10.0
+        yield_range = st.sidebar.slider("Yield Filter (%)", 0.0, max_y, (0.0, max_y))
+        df = df[(df[y_col] >= yield_range[0]) & (df[y_col] <= yield_range[1])]
+
+    safety_range = st.sidebar.slider("Safety Score Filter", 0, 100, (0, 100))
     df = df[(df['Safety Score'] >= safety_range[0]) & (df['Safety Score'] <= safety_range[1])]
     
     # Label Logic (Bold Ticker)
@@ -93,8 +129,10 @@ if active_df is not None:
     tabs = st.tabs(["🎯 Alpha Radar", "📋 Execution Ledger"])
 
     with tabs[0]:
-        st.caption(f"Status: {mode_label}")
+        st.caption(f"Terminal Status: {mode_label}")
         fig = go.Figure()
+        
+        # Calculate dynamic limits based on dataset
         lim_x = max(df['Est EPS Growth'].abs().max() * 1.1, 15) if not df.empty else 15
         lim_y = max(df['Current Valuation'].abs().max() * 1.1, 15) if not df.empty else 15
         
@@ -102,7 +140,7 @@ if active_df is not None:
         fig.add_vline(x=0, line_color="#dee2e6", line_width=1)
 
         if not df.empty:
-            # Enhancement #3: Safety Score Sizing
+            # Safety Score Sizing (Enhancement #3)
             marker_sizes = 8 + (df['Safety Score'] / 100) * 16
 
             fig.add_trace(go.Scatter(
@@ -114,12 +152,11 @@ if active_df is not None:
             ))
 
         fig.update_layout(template="plotly_white", height=780,
-                          xaxis=dict(title="Growth (%)", range=[-lim_x, lim_x]),
-                          yaxis=dict(title="Valuation (%)", range=[-lim_y, lim_y]))
+                          xaxis=dict(title="Est EPS Growth (%)", range=[-lim_x, lim_x]),
+                          yaxis=dict(title="Current Valuation (%)", range=[-lim_y, lim_y]))
         st.plotly_chart(fig, use_container_width=True)
 
     with tabs[1]:
-        st.dataframe(df[['Ticker', 'Rating', 'Safety Score', 'Current Valuation', 'Dividend Yield']]
-                     .sort_values('Safety Score', ascending=False), use_container_width=True)
+        st.dataframe(df.sort_values('Safety Score', ascending=False), use_container_width=True)
 else:
-    st.warning("No data found. Please upload a CSV or ensure 'sp500_dataset.csv' is in your GitHub folder.")
+    st.warning("⚠️ Waiting for data. Please upload a CSV or ensure 'sp500_dataset.csv' is in your GitHub folder.")
